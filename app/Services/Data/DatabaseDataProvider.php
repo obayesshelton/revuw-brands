@@ -3,6 +3,7 @@
 namespace App\Services\Data;
 
 use App\Brand\Brand;
+use App\Brand\BrandManager;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Database\Query\Builder;
@@ -25,9 +26,45 @@ use Illuminate\Support\Str;
  */
 class DatabaseDataProvider implements DataProvider
 {
+    public function __construct(
+        private readonly EodhdNewsService $eodNews,
+    ) {}
+
     private function db(): ConnectionInterface
     {
         return DB::connection('mindjam');
+    }
+
+    /**
+     * Allowed YouTube handles (lowercased) — when non-empty, every query
+     * that touches `channels` is scoped to these. Stored in `services.data
+     * .youtube_handles` (see config/services.php). Lowercased here so
+     * `whereIn` against `LOWER(platform_profile_url)` is case-insensitive.
+     *
+     * @return list<string>
+     */
+    private function allowedHandles(): array
+    {
+        /** @var list<string> $configured */
+        $configured = config('services.data.youtube_handles', []);
+
+        return array_map('strtolower', $configured);
+    }
+
+    /**
+     * Add the channel-handle allowlist filter to any query that joins or
+     * selects from `channels`. `$alias` is the channel-table alias used in
+     * the query (defaults to `ch`).
+     */
+    private function withAllowedChannels(Builder $q, string $alias = 'ch'): Builder
+    {
+        $handles = $this->allowedHandles();
+
+        if ($handles === []) {
+            return $q;
+        }
+
+        return $q->whereIn(DB::raw('lower('.$alias.'.platform_profile_url)'), $handles);
     }
 
     public function trendingEntities(Brand $brand, int $limit = 12): array
@@ -60,8 +97,10 @@ class DatabaseDataProvider implements DataProvider
     public function latestVideos(Brand $brand, int $limit = 10): array
     {
         return $this->remember("latest-videos:{$brand->key}:{$limit}", function () use ($brand, $limit): array {
-            $rows = $this->db()->table('channel_contents as cc')
-                ->join('channels as ch', 'ch.id', '=', 'cc.channel_id')
+            $base = $this->db()->table('channel_contents as cc')
+                ->join('channels as ch', 'ch.id', '=', 'cc.channel_id');
+
+            $rows = $this->withAllowedChannels($base)
                 ->whereNotNull('cc.published_at')
                 ->whereNotNull('cc.summary')
                 ->whereExists(function (Builder $q) use ($brand): void {
@@ -75,8 +114,109 @@ class DatabaseDataProvider implements DataProvider
                 ->limit($limit)
                 ->get($this->videoColumns());
 
-            return array_map(fn ($r) => $this->video($r), $rows->all());
+            $videos = array_map(fn ($r) => $this->video($r), $rows->all());
+
+            $newsEntities = $this->newsEntitiesForBrand($brand);
+
+            if ($newsEntities !== []) {
+                $news = $this->eodNews->videosForEntities($newsEntities);
+                $videos = $this->sortByPublishedDesc(array_merge($videos, $news));
+            }
+
+            return array_slice($videos, 0, $limit);
         });
+    }
+
+    public function latestMentions(Brand $brand, int $limit = 30): array
+    {
+        return $this->remember("latest-mentions:{$brand->key}:{$limit}", function () use ($brand, $limit): array {
+            $base = $this->db()->table('channel_content_entity as cce')
+                ->join('channel_contents as cc', 'cce.channel_content_id', '=', 'cc.id')
+                ->join('channels as ch', 'ch.id', '=', 'cc.channel_id')
+                ->join('entities as e', 'e.id', '=', 'cce.entity_id');
+
+            $rows = $this->withAllowedChannels($base)
+                ->whereIn('e.type', $brand->types)
+                ->whereNotNull('cc.published_at')
+                ->whereNotNull('cc.summary')
+                ->whereNull('ch.deleted_at')
+                ->orderByDesc('cc.published_at')
+                ->limit($limit)
+                ->get([
+                    'cc.id as cc_id',
+                    'cc.title as cc_title',
+                    'cc.platform_content_url as cc_url',
+                    'cc.published_at as cc_published_at',
+                    'cc.platform_info as cc_platform_info',
+                    'ch.id as ch_id',
+                    'ch.title as ch_title',
+                    'ch.platform_profile_url as ch_handle',
+                    'ch.platform_info as ch_info',
+                    'e.id as e_id',
+                    'e.name as e_name',
+                    'e.slug as e_slug',
+                    // `entities` has no ticker column — derived from metadata
+                    // by tickerFor when we hydrate the Mention row.
+                    'e.metadata as e_metadata',
+                    'cce.sentiment as cce_sentiment',
+                ]);
+
+            $youtubeMentions = array_map(
+                fn ($r): array => $this->mention($brand, $r),
+                $rows->all(),
+            );
+
+            // One Mention row per (EOD article × tagged entity).
+            $eodMentions = [];
+            $newsEntities = $this->newsEntitiesForBrand($brand);
+
+            if ($newsEntities !== []) {
+                foreach ($this->eodNews->videosForEntities($newsEntities) as $news) {
+                    foreach ($news['mentionSummary'] as $summary) {
+                        $eodMentions[] = $this->newsToMention($news, $summary);
+                    }
+                }
+            }
+
+            $merged = $this->sortByPublishedDesc(array_merge($youtubeMentions, $eodMentions));
+
+            return array_slice($merged, 0, $limit);
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function mention(Brand $brand, object $row): array
+    {
+        $pi = $this->decode($row->cc_platform_info ?? null);
+        $chInfo = $this->decode($row->ch_info ?? null);
+        $meta = $this->decode($row->e_metadata ?? null);
+        $quickStats = is_array($meta['quickStats'] ?? null) ? $meta['quickStats'] : [];
+
+        return [
+            'id' => "{$row->cc_id}-{$row->e_id}",
+            'source' => 'youtube',
+            'title' => (string) $row->cc_title,
+            'url' => (string) $row->cc_url,
+            'publishedAt' => $row->cc_published_at
+                ? CarbonImmutable::parse($row->cc_published_at)->toIso8601String()
+                : '',
+            'channel' => [
+                'id' => (string) $row->ch_id,
+                'name' => (string) $row->ch_title,
+                'handle' => (string) $row->ch_handle,
+                'thumbnail' => $this->channelThumb($chInfo),
+            ],
+            'entity' => [
+                'name' => (string) $row->e_name,
+                'slug' => (string) $row->e_slug,
+                'type' => $brand->entityType,
+            ],
+            'ticker' => $this->tickerFor($brand, (string) $row->e_name, $quickStats),
+            'sentiment' => $this->sentiment($row->cce_sentiment ?? null),
+            'reach' => (int) ($pi['view_count'] ?? 0),
+        ];
     }
 
     public function entity(Brand $brand, string $slug): ?array
@@ -116,9 +256,11 @@ class DatabaseDataProvider implements DataProvider
     {
         $since = CarbonImmutable::now()->startOfMonth()->subMonths(11);
 
-        $rows = $this->db()->table('channel_content_entity as cce')
+        $base = $this->db()->table('channel_content_entity as cce')
             ->join('channel_contents as cc', 'cce.channel_content_id', '=', 'cc.id')
-            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id')
+            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id');
+
+        $rows = $this->withAllowedChannels($base)
             ->where('cce.entity_id', (int) $entityId)
             ->whereNotNull('cc.summary')
             ->where('cc.published_at', '>=', $since)
@@ -161,9 +303,11 @@ class DatabaseDataProvider implements DataProvider
 
     public function entityTopSources(Brand $brand, string $entityId): array
     {
-        $rows = $this->db()->table('channels as ch')
+        $base = $this->db()->table('channels as ch')
             ->join('channel_contents as cc', 'cc.channel_id', '=', 'ch.id')
-            ->join('channel_content_entity as cce', 'cce.channel_content_id', '=', 'cc.id')
+            ->join('channel_content_entity as cce', 'cce.channel_content_id', '=', 'cc.id');
+
+        $rows = $this->withAllowedChannels($base)
             ->where('cce.entity_id', (int) $entityId)
             ->whereNotNull('cc.published_at')
             ->whereNotNull('cc.summary')
@@ -184,9 +328,11 @@ class DatabaseDataProvider implements DataProvider
 
     public function entityVideos(Brand $brand, string $entityId, int $limit = 20): array
     {
-        $rows = $this->db()->table('channel_content_entity as cce')
+        $base = $this->db()->table('channel_content_entity as cce')
             ->join('channel_contents as cc', 'cce.channel_content_id', '=', 'cc.id')
-            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id')
+            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id');
+
+        $rows = $this->withAllowedChannels($base)
             ->where('cce.entity_id', (int) $entityId)
             ->whereNotNull('cc.published_at')
             ->whereNotNull('cc.summary')
@@ -194,10 +340,21 @@ class DatabaseDataProvider implements DataProvider
             ->limit($limit)
             ->get(array_merge($this->videoColumns(), ['cce.sentiment', 'cce.timestamp_start']));
 
-        return array_map(
+        $videos = array_map(
             fn ($r) => $this->video($r, $this->sentiment($r->sentiment), $r->timestamp_start !== null ? (int) $r->timestamp_start : null),
             $rows->all(),
         );
+
+        // Merge live EOD News for this entity's ticker. The news service
+        // caches per ticker for 6h, so this is a no-op after first warmup.
+        $newsEntity = $this->newsEntityFor($brand, $entityId);
+
+        if ($newsEntity !== null) {
+            $news = $this->eodNews->videosForEntities([$newsEntity]);
+            $videos = $this->sortByPublishedDesc(array_merge($videos, $news));
+        }
+
+        return array_slice($videos, 0, $limit);
     }
 
     public function screenEntities(Brand $brand, array $filters): array
@@ -240,9 +397,11 @@ class DatabaseDataProvider implements DataProvider
 
     public function channel(Brand $brand, string $handle): ?array
     {
-        $row = $this->db()->table('channels')
-            ->where('platform_profile_url', '@'.ltrim($handle, '@'))
-            ->whereNull('deleted_at')
+        $row = $this->withAllowedChannels(
+            $this->db()->table('channels as ch'),
+        )
+            ->where('ch.platform_profile_url', '@'.ltrim($handle, '@'))
+            ->whereNull('ch.deleted_at')
             ->first();
 
         if ($row === null) {
@@ -303,8 +462,10 @@ class DatabaseDataProvider implements DataProvider
 
     public function channelVideos(Brand $brand, string $channelId, int $limit = 20): array
     {
-        $rows = $this->db()->table('channel_contents as cc')
-            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id')
+        $base = $this->db()->table('channel_contents as cc')
+            ->join('channels as ch', 'ch.id', '=', 'cc.channel_id');
+
+        $rows = $this->withAllowedChannels($base)
             ->where('cc.channel_id', (int) $channelId)
             ->whereNotNull('cc.published_at')
             ->whereNotNull('cc.summary')
@@ -326,7 +487,9 @@ class DatabaseDataProvider implements DataProvider
             ->orWhereRaw('lower(ch.platform_profile_url) like ?', ['%'.strtolower($q).'%'])));
 
         $total = (int) $filtered(
-            $this->db()->table('channels as ch')
+            $this->withAllowedChannels(
+                $this->db()->table('channels as ch')
+            )
                 ->whereNull('ch.deleted_at')
                 ->whereExists(fn (Builder $q) => $q->select(DB::raw(1))
                     ->from('channel_contents as cc')
@@ -399,7 +562,7 @@ class DatabaseDataProvider implements DataProvider
 
     private function channelsWithContentCount(): Builder
     {
-        return $this->db()->table('channels as ch')
+        $q = $this->db()->table('channels as ch')
             ->join('channel_contents as cc', function ($join): void {
                 $join->on('cc.channel_id', '=', 'ch.id')
                     ->whereNotNull('cc.published_at')
@@ -409,6 +572,8 @@ class DatabaseDataProvider implements DataProvider
             // Group by the PK only — Postgres can't GROUP BY the json
             // platform_info column, and the others are functionally dependent.
             ->groupBy('ch.id');
+
+        return $this->withAllowedChannels($q);
     }
 
     /**
@@ -488,6 +653,7 @@ class DatabaseDataProvider implements DataProvider
 
         return [
             'id' => (string) $row->id,
+            'source' => 'youtube', // TODO: derive from channel_contents.source once EOD/news lands
             'platformContentUuid' => $uuid,
             'title' => (string) $row->title,
             'generatedTitle' => (string) ($row->generated_title ?: $row->title),
@@ -512,6 +678,173 @@ class DatabaseDataProvider implements DataProvider
                 'handle' => (string) $row->ch_url,
                 'thumbnailUrl' => $this->channelThumb($chInfo),
             ],
+            'mentionSummary' => [], // TODO: wire from extraction pipeline
+        ];
+    }
+
+    public function transcriptForVideo(string $videoId): ?array
+    {
+        if (str_starts_with($videoId, 'eod-')) {
+            // EOD news only applies to stocks-type entities; use a stocks
+            // Brand so newsEntitiesForBrand resolves the same tickers the
+            // listing endpoints used to fetch this article.
+            $stocks = app(BrandManager::class)->make('stocks');
+
+            return $this->eodNews->transcriptForVideo(
+                $videoId,
+                $this->newsEntitiesForBrand($stocks),
+            );
+        }
+
+        // TODO: wire from extraction pipeline. Until then YouTube videos
+        // degrade to a "transcript not available yet" inline message.
+        return null;
+    }
+
+    // --- EOD News integration --------------------------------------------
+
+    /**
+     * Minimal entity descriptor for EodhdNewsService — needs name, slug, type,
+     * ticker. Returns null when the entity isn't found or has no ticker.
+     *
+     * @return array{name: string, slug: string, type: string, ticker: string}|null
+     */
+    private function newsEntityFor(Brand $brand, string $entityId): ?array
+    {
+        $row = $this->db()->table('entities')
+            ->where('id', (int) $entityId)
+            ->whereIn('type', $brand->types)
+            ->first(['name', 'slug', 'metadata']);
+
+        if ($row === null) {
+            return null;
+        }
+
+        $meta = $this->decode($row->metadata ?? null);
+        $quickStats = is_array($meta['quickStats'] ?? null) ? $meta['quickStats'] : [];
+        $ticker = $this->tickerFor($brand, (string) $row->name, $quickStats);
+
+        if ($ticker === null) {
+            return null;
+        }
+
+        return [
+            'name' => (string) $row->name,
+            'slug' => (string) $row->slug,
+            'type' => $brand->entityType,
+            'ticker' => $ticker,
+        ];
+    }
+
+    /**
+     * Top-N brand-typed entities by mention count that resolve to a ticker.
+     * Capped because fanning EODHD news fetches across every tickered entity
+     * in production (79+) was a ~60s cold load — capping at the trending
+     * head matches what users actually look at and keeps cold load < 10s.
+     * Result cached for 10 min; EodhdNewsService caches per ticker on its
+     * own (6h).
+     *
+     * @return list<array{name: string, slug: string, type: string, ticker: string}>
+     */
+    private function newsEntitiesForBrand(Brand $brand, int $cap = 12): array
+    {
+        if (! $brand->hasPrice()) {
+            return [];
+        }
+
+        return $this->remember("news-entities:{$brand->key}:{$cap}", function () use ($brand, $cap): array {
+            $rows = $this->visibleEntityMentions($brand)
+                ->groupBy('e.id', 'e.name', 'e.slug')
+                ->orderByRaw('count(*) desc')
+                ->limit($cap)
+                ->get(['e.id', 'e.name', 'e.slug']);
+
+            if ($rows->isEmpty()) {
+                return [];
+            }
+
+            $ids = array_map(fn ($r) => (int) $r->id, $rows->all());
+            $metadata = $this->db()->table('entities')->whereIn('id', $ids)->pluck('metadata', 'id');
+
+            $entities = [];
+
+            foreach ($rows as $row) {
+                $meta = $this->decode($metadata[$row->id] ?? null);
+                $quickStats = is_array($meta['quickStats'] ?? null) ? $meta['quickStats'] : [];
+                $ticker = $this->tickerFor($brand, (string) $row->name, $quickStats);
+
+                if ($ticker === null || ! $this->looksLikeTicker($ticker)) {
+                    continue;
+                }
+
+                $entities[] = [
+                    'name' => (string) $row->name,
+                    'slug' => (string) $row->slug,
+                    'type' => $brand->entityType,
+                    'ticker' => $ticker,
+                ];
+            }
+
+            return $entities;
+        });
+    }
+
+    /**
+     * Cheap sanity check before we burn an EODHD call on a ticker. mind-jam's
+     * metadata can carry stray free-text values in the `ticker` slot (e.g.
+     * "The Donkey"); EODHD format is SYMBOL.EXCHANGE.
+     */
+    private function looksLikeTicker(string $ticker): bool
+    {
+        return preg_match('/^[A-Z][A-Z0-9.\-]{0,11}$/', $ticker) === 1;
+    }
+
+    /**
+     * Sort any array of Video- or Mention-shaped items newest first.
+     *
+     * @param  list<array<string, mixed>>  $items
+     * @return list<array<string, mixed>>
+     */
+    private function sortByPublishedDesc(array $items): array
+    {
+        usort(
+            $items,
+            fn (array $a, array $b): int => strcmp(
+                (string) ($b['publishedAt'] ?? ''),
+                (string) ($a['publishedAt'] ?? ''),
+            ),
+        );
+
+        return $items;
+    }
+
+    /**
+     * Flatten an EOD news Video + a single mentionSummary entry into a
+     * Mention row, mirroring MockDataProvider::toMention so the frontend
+     * MentionsTable renders both sources identically.
+     *
+     * @param  array<string, mixed>  $news
+     * @param  array<string, mixed>  $summary
+     * @return array<string, mixed>
+     */
+    private function newsToMention(array $news, array $summary): array
+    {
+        return [
+            'id' => $news['id'].'-'.($summary['entity']['slug'] ?? ''),
+            'source' => 'eod_news',
+            'title' => (string) $news['title'],
+            'url' => (string) $news['url'],
+            'publishedAt' => (string) $news['publishedAt'],
+            'channel' => [
+                'id' => (string) $news['channel']['handle'],
+                'name' => (string) $news['channel']['title'],
+                'handle' => (string) $news['channel']['handle'],
+                'thumbnail' => (string) $news['channel']['thumbnailUrl'],
+            ],
+            'entity' => $summary['entity'],
+            'ticker' => $summary['ticker'] ?? null,
+            'sentiment' => $news['entitySentiment'] ?? null,
+            'reach' => 0,
         ];
     }
 

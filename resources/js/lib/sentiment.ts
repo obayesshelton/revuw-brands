@@ -1,5 +1,6 @@
 import { Minus, TrendingDown, TrendingUp } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { SENTIMENT_TEXT_CLASS } from '@/lib/colors';
 import type { Sentiment } from '@/types/investor';
 
 type SentimentConfig = {
@@ -11,17 +12,17 @@ type SentimentConfig = {
 export const sentimentConfig: Record<Sentiment, SentimentConfig> = {
     positive: {
         label: 'Positive',
-        className: 'text-emerald-600 dark:text-emerald-400',
+        className: SENTIMENT_TEXT_CLASS.positive,
         icon: TrendingUp,
     },
     neutral: {
         label: 'Neutral',
-        className: 'text-muted-foreground',
+        className: SENTIMENT_TEXT_CLASS.neutral,
         icon: Minus,
     },
     negative: {
         label: 'Negative',
-        className: 'text-red-600 dark:text-red-400',
+        className: SENTIMENT_TEXT_CLASS.negative,
         icon: TrendingDown,
     },
 };

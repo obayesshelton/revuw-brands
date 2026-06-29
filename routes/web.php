@@ -4,6 +4,7 @@ use App\Http\Controllers\Investor\ChannelController;
 use App\Http\Controllers\Investor\EntityController;
 use App\Http\Controllers\Investor\HomeController;
 use App\Http\Controllers\Investor\PriceController;
+use App\Http\Controllers\Investor\VideoTranscriptController;
 use Illuminate\Support\Facades\Route;
 
 // Homepage
@@ -22,6 +23,12 @@ Route::get('/channels/{handle}', [ChannelController::class, 'show'])
 // Price (async JSON; brand-aware via the web middleware group)
 Route::get('/api/price/{ticker}/quote', [PriceController::class, 'quote'])->name('price.quote');
 Route::get('/api/price/{ticker}/history', [PriceController::class, 'history'])->name('price.history');
+Route::get('/api/price/{ticker}/fundamentals', [PriceController::class, 'fundamentals'])->name('price.fundamentals');
+
+// Chatter transcript (async; lazy-loaded by the YouTube/EOD-news card on expand)
+Route::get('/api/videos/{video}/transcript', [VideoTranscriptController::class, 'show'])
+    ->where('video', '[A-Za-z0-9._-]+')
+    ->name('video.transcript');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('dashboard', 'dashboard')->name('dashboard');

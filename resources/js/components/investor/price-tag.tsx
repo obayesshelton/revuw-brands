@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { PRICE_TEXT_CLASS } from '@/lib/colors';
 import { fetchQuote } from '@/lib/eodhd';
 import { formatCurrency, formatSignedPercent } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -66,9 +67,7 @@ export function PriceTag({
             <span
                 className={cn(
                     'text-xs font-medium',
-                    up
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-red-600 dark:text-red-400',
+                    up ? PRICE_TEXT_CLASS.up : PRICE_TEXT_CLASS.down,
                 )}
             >
                 {formatSignedPercent(quote.change_p)}

@@ -40,6 +40,40 @@ export function formatMonthShort(month: string): string {
     });
 }
 
+/** Unix seconds -> 'Jun 26, 3:42 PM'. EODHD quotes return seconds since epoch. */
+export function formatUnixDateTime(unixSeconds: number): string {
+    return new Date(unixSeconds * 1000).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+    });
+}
+
+/** ISO date -> '2h ago' / '3d ago' / 'Mar 4'. Falls back to absolute date past 30 days. */
+export function formatTimeAgo(iso: string): string {
+    const past = new Date(iso).getTime();
+    const diffSec = Math.max(0, (Date.now() - past) / 1000);
+
+    if (diffSec < 60) {
+return 'just now';
+}
+
+    if (diffSec < 3600) {
+return `${Math.floor(diffSec / 60)}m ago`;
+}
+
+    if (diffSec < 86400) {
+return `${Math.floor(diffSec / 3600)}h ago`;
+}
+
+    if (diffSec < 86400 * 30) {
+return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+    return formatDate(iso);
+}
+
 /** seconds -> 'm:ss' */
 export function formatDuration(seconds: number): string {
     const minutes = Math.floor(seconds / 60);

@@ -1,10 +1,9 @@
 import { Head, Link, usePage } from '@inertiajs/react';
-import { ArticleCard } from '@/components/investor/article-card';
 import { ChannelCardGrid } from '@/components/investor/channel-card-grid';
+import { ChatterFeed } from '@/components/investor/chatter/chatter-card';
 import { EntityCardGrid } from '@/components/investor/entity/entity-card-grid';
 import { GlobalSearch } from '@/components/investor/global-search';
 import { SectionHeading } from '@/components/investor/section-heading';
-import { VideoList } from '@/components/investor/video-list';
 import { Button } from '@/components/ui/button';
 import type { ChannelSummary, EntitySummary, Video } from '@/types/investor';
 
@@ -21,9 +20,6 @@ export default function Home({
 }: HomeProps) {
     const { brand } = usePage().props;
     const plural = brand.copy.entityNounPlural;
-
-    const articles = latestVideos.slice(0, 4);
-    const videos = latestVideos.slice(4, 10);
 
     return (
         <>
@@ -57,7 +53,17 @@ export default function Home({
                 <EntityCardGrid entities={trendingEntities} />
             </section>
 
-            <section className="mb-12">
+            {latestVideos.length > 0 && (
+                <section>
+                    <SectionHeading
+                        title="Latest chatter"
+                        description={`Fresh coverage mentioning the ${plural} we track — across YouTube and the wires.`}
+                    />
+                    <ChatterFeed videos={latestVideos} />
+                </section>
+            )}
+
+            <section className="mt-12">
                 <SectionHeading
                     title="Trending Channels"
                     description="The channels driving the most coverage."
@@ -69,30 +75,6 @@ export default function Home({
                 />
                 <ChannelCardGrid channels={trendingChannels} />
             </section>
-
-            {articles.length > 0 && (
-                <section className="mb-12">
-                    <SectionHeading
-                        title="From Revuw"
-                        description="The latest Revuw Articles, generated from new coverage."
-                    />
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                        {articles.map((video) => (
-                            <ArticleCard key={video.id} video={video} />
-                        ))}
-                    </div>
-                </section>
-            )}
-
-            {videos.length > 0 && (
-                <section>
-                    <SectionHeading
-                        title="Latest YouTube videos"
-                        description="Fresh videos mentioning the entities we track."
-                    />
-                    <VideoList videos={videos} />
-                </section>
-            )}
         </>
     );
 }

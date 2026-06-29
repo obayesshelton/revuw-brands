@@ -11,12 +11,13 @@ import {
 } from 'recharts';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { PRICE_HEX } from '@/lib/colors';
 import { fetchHistory, PRICE_RANGES } from '@/lib/eodhd';
 import { formatCurrency, formatSignedPercent } from '@/lib/format';
 import type { PriceCandle, PriceRange } from '@/types/investor';
 
-const UP = '#10b981'; // emerald-500
-const DOWN = '#ef4444'; // red-500
+const UP = PRICE_HEX.up;
+const DOWN = PRICE_HEX.down;
 
 function tickDate(date: string): string {
     return new Date(date).toLocaleDateString('en-US', {

@@ -47,6 +47,41 @@ class MockPriceProvider implements PriceProvider
         ];
     }
 
+    public function fundamentals(string $ticker): ?array
+    {
+        $ticker = strtoupper(trim($ticker));
+
+        if ($ticker === '') {
+            return null;
+        }
+
+        // EODHD tickers are SYMBOL.EXCHANGE; split so we can echo a sensible
+        // exchange label without needing a real lookup.
+        [$code, $exchangeCode] = array_pad(explode('.', $ticker, 2), 2, 'US');
+        $exchanges = [
+            'US' => ['name' => 'NASDAQ', 'country' => 'USA', 'currency' => 'USD', 'symbol' => '$'],
+            'LSE' => ['name' => 'London Stock Exchange', 'country' => 'UK', 'currency' => 'GBP', 'symbol' => '£'],
+            'XETRA' => ['name' => 'XETRA', 'country' => 'Germany', 'currency' => 'EUR', 'symbol' => '€'],
+            'TO' => ['name' => 'Toronto Stock Exchange', 'country' => 'Canada', 'currency' => 'CAD', 'symbol' => 'C$'],
+        ];
+        $exchange = $exchanges[$exchangeCode] ?? $exchanges['US'];
+
+        return [
+            'code' => $code,
+            'ticker' => $ticker,
+            'name' => $code, // stub — real EODHD returns the company name
+            'exchange' => $exchange['name'],
+            'exchangeCode' => $exchangeCode,
+            'currencyCode' => $exchange['currency'],
+            'currencySymbol' => $exchange['symbol'],
+            'country' => $exchange['country'],
+            // Real EODHD returns a hosted PNG (e.g. /img/logos/US/aapl.png).
+            // Mock leaves it null so the UI falls back to a ticker monogram.
+            'logoUrl' => null,
+            'updatedAt' => CarbonImmutable::now()->subDay()->toIso8601String(),
+        ];
+    }
+
     public function history(string $ticker, string $range = '1y'): array
     {
         $ticker = strtoupper(trim($ticker));

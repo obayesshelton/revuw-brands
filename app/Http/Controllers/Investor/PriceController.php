@@ -31,4 +31,11 @@ class PriceController extends Controller
             'candles' => $price->history($ticker, $range),
         ]);
     }
+
+    public function fundamentals(PriceProvider $price, string $ticker): JsonResponse
+    {
+        return response()->json([
+            'fundamentals' => $price->fundamentals($ticker),
+        ]);
+    }
 }

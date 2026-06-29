@@ -1,10 +1,10 @@
 import { Head } from '@inertiajs/react';
 import { ExternalLink } from 'lucide-react';
 import { useState } from 'react';
+import { ChatterFeed } from '@/components/investor/chatter/chatter-card';
 import { EntityCardGrid } from '@/components/investor/entity/entity-card-grid';
 import { SearchInput } from '@/components/investor/search-input';
 import { StatGrid } from '@/components/investor/stat-grid';
-import { VideoList } from '@/components/investor/video-list';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -99,7 +99,7 @@ export default function ChannelProfile({
                         className="sm:max-w-xs"
                     />
                     {shownVideos.length > 0 ? (
-                        <VideoList videos={shownVideos} />
+                        <ChatterFeed videos={shownVideos} />
                     ) : (
                         <p className="py-8 text-center text-sm text-muted-foreground">
                             No videos match “{query}”.

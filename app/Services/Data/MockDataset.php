@@ -12,7 +12,7 @@ use Illuminate\Support\Str;
  */
 class MockDataset
 {
-    /** @var array{entities: list<array<string, mixed>>, channels: list<array<string, mixed>>, videos: list<array<string, mixed>>}|null */
+    /** @var array{entities: list<array<string, mixed>>, channels: list<array<string, mixed>>, videos: list<array<string, mixed>>, transcripts: array<string, array<string, mixed>>}|null */
     private static ?array $cache = null;
 
     /**
@@ -126,7 +126,15 @@ class MockDataset
     }
 
     /**
-     * @return array{entities: list<array<string, mixed>>, channels: list<array<string, mixed>>, videos: list<array<string, mixed>>}
+     * @return array<string, mixed>|null
+     */
+    public static function transcriptFor(string $videoId): ?array
+    {
+        return self::build()['transcripts'][$videoId] ?? null;
+    }
+
+    /**
+     * @return array{entities: list<array<string, mixed>>, channels: list<array<string, mixed>>, videos: list<array<string, mixed>>, transcripts: array<string, array<string, mixed>>}
      */
     private static function build(): array
     {
@@ -136,7 +144,7 @@ class MockDataset
 
         $channels = self::buildChannels();
         $entities = self::buildEntities();
-        $videos = self::buildVideos($entities, $channels);
+        [$videos, $transcripts] = self::buildVideos($entities, $channels);
 
         // Attach video-derived aggregates.
         $months = self::monthKeys();
@@ -158,6 +166,7 @@ class MockDataset
             'entities' => $entities,
             'channels' => $channels,
             'videos' => $videos,
+            'transcripts' => $transcripts,
         ];
     }
 
@@ -315,7 +324,7 @@ class MockDataset
     /**
      * @param  list<array<string, mixed>>  $entities
      * @param  list<array<string, mixed>>  $channels
-     * @return list<array<string, mixed>>
+     * @return array{0: list<array<string, mixed>>, 1: array<string, array<string, mixed>>}
      */
     private static function buildVideos(array $entities, array $channels): array
     {
@@ -323,7 +332,12 @@ class MockDataset
         $claims = ['could be the trade of the year', 'is dividing investors', 'just changed the game', 'is more fragile than it looks', 'keeps beating expectations', 'faces a reckoning'];
         $sentiments = ['positive', 'positive', 'neutral', 'negative', 'neutral'];
 
+        // Same-type peers a video can mention alongside its focal entity.
+        $stockEntities = array_values(array_filter($entities, fn ($e) => $e['type'] === 'stocks'));
+        $startupEntities = array_values(array_filter($entities, fn ($e) => $e['type'] === 'startups'));
+
         $videos = [];
+        $transcripts = [];
 
         foreach ($entities as $entity) {
             $slug = $entity['slug'];
@@ -341,6 +355,7 @@ class MockDataset
             }
 
             $videoCount = 8 + self::h($slug, 'vc') % 9; // 8..16
+            $peerPool = $entity['type'] === 'stocks' ? $stockEntities : $startupEntities;
 
             for ($v = 0; $v < $videoCount; $v++) {
                 $channel = $picked[$v % $coverCount];
@@ -353,19 +368,101 @@ class MockDataset
 
                 $id = 'vid-'.$slug.'-'.$v;
 
+                // Real EOD news comes from EodhdNewsService; this mock now
+                // only generates the YouTube half of the chatter feed.
+                $isYoutube = true;
+                $source = 'youtube';
+
+                // Pick the focal entity + 1-3 peers, deterministically.
+                $peerCount = 1 + self::h($slug, 'pc', (string) $v) % 3;
+                $mentionedEntities = [$entity];
+                $peerStart = self::h($slug, 'ps', (string) $v) % max(count($peerPool), 1);
+                for ($p = 0; $p < $peerCount && $p < count($peerPool); $p++) {
+                    $candidate = $peerPool[($peerStart + $p) % count($peerPool)];
+                    if ($candidate['id'] === $entity['id']) {
+                        continue;
+                    }
+                    $mentionedEntities[] = $candidate;
+                }
+
+                // Build per-mention occurrences. Each mentioned entity gets 1-3
+                // occurrences; for YouTube each has a timestamp inside the
+                // video's duration; for EOD news timestamps are null.
+                $rawMentions = [];
+                foreach ($mentionedEntities as $idx => $me) {
+                    $occCount = 1 + self::h($slug, 'oc', (string) $v, (string) $idx) % 3;
+                    for ($o = 0; $o < $occCount; $o++) {
+                        $sent = $sentiments[self::h($slug, 'ms', (string) $v, (string) $idx, (string) $o) % count($sentiments)];
+                        $ts = $isYoutube
+                            ? (int) (self::h($slug, 'mt', (string) $v, (string) $idx, (string) $o) % max($durationSeconds - 10, 30))
+                            : null;
+                        $rawMentions[] = [
+                            'entity' => [
+                                'name' => $me['name'],
+                                'slug' => $me['slug'],
+                                'type' => $me['type'],
+                            ],
+                            'ticker' => $me['ticker'] ?? null,
+                            'timestamp' => $ts,
+                            'sentiment' => $sent,
+                            'snippet' => "{$me['name']} {$claim}.",
+                        ];
+                    }
+                }
+
+                // Sort YouTube mentions by timestamp so segments build cleanly.
+                if ($isYoutube) {
+                    usort($rawMentions, fn ($a, $b) => $a['timestamp'] <=> $b['timestamp']);
+                }
+
+                // Summary: group by entity slug, majority sentiment per group.
+                $bySlug = [];
+                foreach ($rawMentions as $m) {
+                    $key = $m['entity']['slug'];
+                    if (! isset($bySlug[$key])) {
+                        $bySlug[$key] = [
+                            'entity' => $m['entity'],
+                            'ticker' => $m['ticker'],
+                            'count' => 0,
+                            'sentimentTallies' => ['positive' => 0, 'negative' => 0, 'neutral' => 0],
+                        ];
+                    }
+                    $bySlug[$key]['count']++;
+                    $bySlug[$key]['sentimentTallies'][$m['sentiment']]++;
+                }
+                $mentionSummary = [];
+                foreach ($bySlug as $row) {
+                    arsort($row['sentimentTallies']);
+                    $mentionSummary[] = [
+                        'entity' => $row['entity'],
+                        'ticker' => $row['ticker'],
+                        'count' => $row['count'],
+                        'sentiment' => array_key_first($row['sentimentTallies']),
+                    ];
+                }
+
+                $transcripts[$id] = self::buildTimestampedTranscript($id, $rawMentions, $durationSeconds);
+                $thumbnail = 'https://picsum.photos/seed/'.$id.'/640/360';
+                $title = "{$entity['name']}: {$topic}";
+                $url = 'https://youtube.com/watch?v='.substr(md5($id), 0, 11);
+                $publisherName = $channel['title'];
+                $publisherHandle = $channel['handle'];
+                $publisherThumb = $channel['thumbnailUrl'];
+
                 $videos[] = [
                     'id' => $id,
+                    'source' => $source,
                     'entityId' => $entity['id'],
                     'channelId' => $channel['id'],
                     'platformContentUuid' => substr(md5($id), 0, 11),
-                    'title' => "{$entity['name']}: {$topic}",
+                    'title' => $title,
                     'generatedTitle' => "Why {$entity['name']} {$claim}",
-                    'url' => 'https://youtube.com/watch?v='.substr(md5($id), 0, 11),
+                    'url' => $url,
                     'articleUrl' => '/channels/'.$channel['handle'].'/'.substr(md5($id), 0, 11),
                     'summary' => "In this video, **{$channel['title']}** walks through {$entity['name']} — {$topic}. ".
                         "The discussion covers recent momentum, the key risks, and what it means for investors watching {$entity['name']} right now.",
                     'tldr' => "{$channel['title']} thinks {$entity['name']} {$claim}.",
-                    'thumbnail' => 'https://picsum.photos/seed/'.$id.'/640/360',
+                    'thumbnail' => $thumbnail,
                     'publishedAt' => $publishedAt->toIso8601String(),
                     'readDuration' => 3 + self::h($slug, 'rd', (string) $v) % 9,
                     'citations' => [
@@ -384,15 +481,63 @@ class MockDataset
                     'entitySentiment' => $sentiments[self::h($slug, 'se', (string) $v) % count($sentiments)],
                     'entityTimestampStart' => self::h($slug, 'st', (string) $v) % $durationSeconds,
                     'channel' => [
-                        'title' => $channel['title'],
-                        'handle' => $channel['handle'],
-                        'thumbnailUrl' => $channel['thumbnailUrl'],
+                        'title' => $publisherName,
+                        'handle' => $publisherHandle,
+                        'thumbnailUrl' => $publisherThumb,
                     ],
+                    'mentionSummary' => $mentionSummary,
                 ];
             }
         }
 
-        return $videos;
+        return [$videos, $transcripts];
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $mentions  pre-sorted by timestamp
+     * @return array<string, mixed>
+     */
+    private static function buildTimestampedTranscript(string $videoId, array $mentions, int $durationSeconds): array
+    {
+        $intros = [
+            "Welcome back everyone. Today I want to walk through a few names I'm watching closely — and the biggest one is",
+            "Let's get into the watchlist. First up,",
+            "Now let's talk about",
+            "Moving on to the next name —",
+            "The story I keep coming back to this week is",
+            "Quick note on",
+            "And finally,",
+        ];
+
+        $segments = [];
+        foreach ($mentions as $idx => $m) {
+            $intro = $intros[$idx % count($intros)];
+            $segments[] = [
+                'timestamp' => $m['timestamp'],
+                'tokens' => [
+                    ['kind' => 'text', 'text' => $intro.' '],
+                    ['kind' => 'mention', 'text' => $m['ticker'] ?? $m['entity']['name'], 'mentionIndex' => $idx],
+                    ['kind' => 'text', 'text' => ". {$m['snippet']}"],
+                ],
+            ];
+        }
+
+        // Closing segment if we have any mentions.
+        if ($segments !== []) {
+            $segments[] = [
+                'timestamp' => min($durationSeconds - 5, (int) ($durationSeconds * 0.95)),
+                'tokens' => [
+                    ['kind' => 'text', 'text' => "That wraps the watchlist. As always — this is not financial advice, do your own homework."],
+                ],
+            ];
+        }
+
+        return [
+            'kind' => 'timestamped',
+            'videoId' => $videoId,
+            'mentions' => $mentions,
+            'segments' => $segments,
+        ];
     }
 
     /**

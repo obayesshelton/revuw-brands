@@ -15,4 +15,12 @@ interface PriceProvider
 
     /** @return list<array<string, mixed>> EODHD end-of-day candles */
     public function history(string $ticker, string $range = '1y'): array;
+
+    /**
+     * EODHD fundamentals — the `General` block trimmed to what the UI needs
+     * (code, name, exchange, currency, logo). Returns null if unknown.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function fundamentals(string $ticker): ?array;
 }

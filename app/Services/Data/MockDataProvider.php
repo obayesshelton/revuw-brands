@@ -7,6 +7,10 @@ use Carbon\CarbonImmutable;
 
 class MockDataProvider implements DataProvider
 {
+    public function __construct(
+        private readonly EodhdNewsService $eodNews,
+    ) {}
+
     public function trendingEntities(Brand $brand, int $limit = 12): array
     {
         $entities = MockDataset::entities($brand->entityType);
@@ -95,27 +99,126 @@ class MockDataProvider implements DataProvider
 
     public function entityVideos(Brand $brand, string $entityId, int $limit = 20): array
     {
-        $videos = MockDataset::videosForEntity($entityId);
-        $videos = $this->sortByPublishedDesc($videos);
+        $entity = MockDataset::entityById($entityId);
+        if ($entity === null) {
+            return [];
+        }
 
-        return array_map($this->toVideo(...), array_slice($videos, 0, $limit));
+        $videos = array_map($this->toVideo(...), MockDataset::videosForEntity($entityId));
+
+        // Live EOD news for just this entity's ticker. The service caches so
+        // multiple calls within the TTL hit the local store, not the API.
+        $news = $this->eodNews->videosForEntities([$entity]);
+
+        $merged = $this->sortByPublishedDesc(array_merge($videos, $news));
+
+        return array_slice($merged, 0, $limit);
+    }
+
+    public function transcriptForVideo(string $videoId): ?array
+    {
+        if (str_starts_with($videoId, 'eod-')) {
+            return $this->eodNews->transcriptForVideo($videoId, MockDataset::entities());
+        }
+
+        return MockDataset::transcriptFor($videoId);
     }
 
     public function latestVideos(Brand $brand, int $limit = 10): array
     {
+        $entities = MockDataset::entities($brand->entityType);
         $ids = [];
-        foreach (MockDataset::entities($brand->entityType) as $entity) {
+        foreach ($entities as $entity) {
             $ids[$entity['id']] = true;
         }
 
-        $videos = array_values(array_filter(
+        $youtube = array_map(
+            $this->toVideo(...),
+            array_values(array_filter(
+                MockDataset::videos(),
+                fn (array $v): bool => isset($ids[$v['entityId']]),
+            )),
+        );
+
+        $news = $this->eodNews->videosForEntities($entities);
+        $merged = $this->sortByPublishedDesc(array_merge($youtube, $news));
+
+        return array_slice($merged, 0, $limit);
+    }
+
+    public function latestMentions(Brand $brand, int $limit = 30): array
+    {
+        $entities = MockDataset::entities($brand->entityType);
+
+        $refsById = [];
+        $tickersById = [];
+        foreach ($entities as $entity) {
+            $refsById[$entity['id']] = [
+                'name' => $entity['name'],
+                'slug' => $entity['slug'],
+                'type' => $entity['type'],
+            ];
+            $tickersById[$entity['id']] = $entity['ticker'] ?? null;
+        }
+
+        // YouTube mentions — one per video, tagged with its focal entity.
+        $youtubeVideos = array_values(array_filter(
             MockDataset::videos(),
-            fn (array $v): bool => isset($ids[$v['entityId']]),
+            fn (array $v): bool => isset($refsById[$v['entityId']]),
         ));
 
-        $videos = $this->sortByPublishedDesc($videos);
+        $youtubeMentions = array_map(
+            fn (array $v): array => $this->toMention(
+                $v,
+                $refsById[$v['entityId']],
+                $tickersById[$v['entityId']] ?? null,
+            ),
+            $youtubeVideos,
+        );
 
-        return array_map($this->toVideo(...), array_slice($videos, 0, $limit));
+        // EOD news mentions — one row per (article × tagged entity) so a
+        // wire piece that names AAPL + MSFT shows up twice, each with its
+        // own ticker and price.
+        $eodMentions = [];
+        foreach ($this->eodNews->videosForEntities($entities) as $news) {
+            foreach ($news['mentionSummary'] as $summary) {
+                $eodMentions[] = $this->toMention(
+                    $news,
+                    $summary['entity'],
+                    $summary['ticker'] ?? null,
+                );
+            }
+        }
+
+        $merged = $this->sortByPublishedDesc(array_merge($youtubeMentions, $eodMentions));
+
+        return array_slice($merged, 0, $limit);
+    }
+
+    /**
+     * @param  array<string, mixed>  $video
+     * @param  array<string, mixed>  $entity
+     * @return array<string, mixed>
+     */
+    private function toMention(array $video, array $entity, ?string $ticker): array
+    {
+        return [
+            'id' => $video['id'].'-'.$entity['slug'],
+            'source' => $video['source'] ?? 'youtube',
+            'title' => $video['title'],
+            'url' => $video['url'],
+            'publishedAt' => $video['publishedAt'],
+            'channel' => [
+                'id' => $video['channel']['handle'],
+                'name' => $video['channel']['title'],
+                'handle' => $video['channel']['handle'],
+                'thumbnail' => $video['channel']['thumbnailUrl'],
+            ],
+            'entity' => $entity,
+            'ticker' => $ticker,
+            'sentiment' => $video['entitySentiment'],
+            'reach' => $video['platformInfo']['viewCount'] ?? 0,
+        ];
     }
 
     public function screenEntities(Brand $brand, array $filters): array

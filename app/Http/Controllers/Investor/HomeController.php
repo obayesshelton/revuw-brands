@@ -15,7 +15,7 @@ class HomeController extends Controller
         return Inertia::render('investor/home', [
             'trendingEntities' => $data->trendingEntities($brand, 12),
             'trendingChannels' => $data->trendingChannels($brand, 8),
-            'latestVideos' => $data->latestVideos($brand, 10),
+            'latestVideos' => $data->latestVideos($brand, 30),
         ]);
     }
 }

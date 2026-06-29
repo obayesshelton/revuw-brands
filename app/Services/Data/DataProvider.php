@@ -25,6 +25,15 @@ interface DataProvider
     /** @return list<array<string, mixed>> Video[] — most recent content across the brand's entities */
     public function latestVideos(Brand $brand, int $limit = 10): array;
 
+    /**
+     * Source-agnostic mention feed used by the global MentionsTable.
+     * Each row is one (content × entity) pair; a video that mentions
+     * two entities therefore appears twice in the result.
+     *
+     * @return list<array<string, mixed>> Mention[]
+     */
+    public function latestMentions(Brand $brand, int $limit = 30): array;
+
     /** @return array<string, mixed>|null Entity */
     public function entity(Brand $brand, string $slug): ?array;
 
@@ -36,6 +45,16 @@ interface DataProvider
 
     /** @return list<array<string, mixed>> Video[] */
     public function entityVideos(Brand $brand, string $entityId, int $limit = 20): array;
+
+    /**
+     * Heavy per-video transcript. Returns the discriminated VideoTranscript
+     * shape — `{kind: 'timestamped', ...}` for YouTube-style sources with
+     * captions, `{kind: 'prose', ...}` for article-shaped sources like EOD
+     * news. Null when no transcript is available yet.
+     *
+     * @return array<string, mixed>|null VideoTranscript
+     */
+    public function transcriptForVideo(string $videoId): ?array;
 
     /**
      * @param  array<string, mixed>  $filters  ScreenerFilters

@@ -122,12 +122,70 @@ export interface VideoChannel {
     thumbnailUrl: string;
 }
 
+/** Where a piece of chatter came from. Initial release: youtube + eod_news. */
+export type ChatterSource = 'youtube' | 'eod_news' | 'reddit' | 'revuw';
+
+/**
+ * Lightweight per-entity summary shipped inline with each Video in list
+ * payloads — just enough to render the collapsed-row chip strip without
+ * loading the full transcript.
+ */
+export interface VideoMentionSummary {
+    entity: EntityRef;
+    ticker: string | null;
+    count: number;
+    sentiment: Sentiment; // majority across this item's mentions
+}
+
+/**
+ * Heavy per-mention data — only loaded via /api/videos/{id}/transcript.
+ * `timestamp` is null for sources with no timeline (EOD news).
+ */
+export interface VideoMention {
+    entity: EntityRef;
+    ticker: string | null;
+    timestamp: number | null;
+    sentiment: Sentiment;
+    snippet: string;
+}
+
+export interface TranscriptToken {
+    kind: 'text' | 'mention';
+    text: string;
+    mentionIndex?: number; // index into VideoTranscript.mentions
+}
+
+export interface TranscriptSegment {
+    timestamp: number;
+    tokens: TranscriptToken[];
+}
+
+/**
+ * Discriminated by `kind` so the frontend reads what arrived, not what it
+ * expected from the source: a captionless YouTube video can degrade to
+ * `prose`, a structured news wire could surface as `timestamped`.
+ */
+export type VideoTranscript =
+    | {
+          kind: 'timestamped';
+          videoId: string;
+          mentions: VideoMention[];
+          segments: TranscriptSegment[];
+      }
+    | {
+          kind: 'prose';
+          videoId: string;
+          mentions: VideoMention[];
+          body: string; // markdown
+      };
+
 export interface Video {
     id: string;
+    source: ChatterSource;
     platformContentUuid: string;
     title: string;
     generatedTitle: string;
-    url: string; // YouTube watch URL
+    url: string; // platform watch / article URL
     articleUrl: string; // on-site "Revuw Article"
     summary: string; // markdown
     tldr: string;
@@ -139,6 +197,7 @@ export interface Video {
     entitySentiment: Sentiment | null;
     entityTimestampStart: number | null; // seconds into the video
     channel: VideoChannel;
+    mentionSummary: VideoMentionSummary[];
 }
 
 /** EODHD real-time quote shape (15-20 min delayed). */
@@ -153,6 +212,20 @@ export interface PriceQuote {
     previousClose: number;
     change: number;
     change_p: number;
+}
+
+/** Trimmed EODHD fundamentals `General` block — what the stock header needs. */
+export interface PriceFundamentals {
+    code: string;
+    ticker: string;
+    name: string;
+    exchange: string;
+    exchangeCode: string;
+    currencyCode: string;
+    currencySymbol: string;
+    country: string;
+    logoUrl: string | null;
+    updatedAt: string;
 }
 
 /** EODHD end-of-day historical candle shape. */
@@ -186,4 +259,39 @@ export interface PaginationMeta {
 export interface Paginated<T> {
     data: T[];
     meta: PaginationMeta;
+}
+
+
+export interface MentionChannel {
+    id: string;
+    name: string;
+    handle: string;
+    thumbnail: string;
+}
+
+/**
+ * Source-agnostic mention. A YouTube video, a Reddit post, or a Revuw article
+ * all flatten into this shape so the global MentionsTable can render them
+ * uniformly. `entity` is null in single-entity contexts (entity profile) and
+ * populated in cross-entity contexts (homepage, screener). `entityFundamentals`
+ * is opt-in EOD context surfaced on the screener for stock-specific columns.
+ */
+export interface Mention {
+    id: string;
+    source: ChatterSource;
+    title: string;
+    url: string;
+    publishedAt: string;
+    channel: MentionChannel;
+    entity: EntityRef | null;
+    /**
+     * The mentioned entity's ticker, when it has one (stocks brand). Carried
+     * here — not derived from `entity` — so the price column can fetch
+     * without a lookup, and so news items that tag multiple symbols can each
+     * stamp the right one per row.
+     */
+    ticker: string | null;
+    sentiment: Sentiment | null;
+    reach: number;
+    entityFundamentals?: PriceFundamentals | null;
 }

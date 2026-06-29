@@ -39,6 +39,19 @@ return [
     // 'database' (mind-jam's shared Postgres, not implemented yet).
     'data' => [
         'provider' => env('DATA_PROVIDER', 'mock'),
+
+        // Optional allowlist of YouTube handles (case-insensitive). When set,
+        // DatabaseDataProvider filters every channel/video/mention query down
+        // to chatter from these handles only. Empty (default) = no filter.
+        // Override via YOUTUBE_ALLOWED_HANDLES env (comma-separated, with or
+        // without the leading `@`).
+        'youtube_handles' => array_values(array_filter(array_map(
+            fn (string $h): string => '@'.ltrim(trim($h), '@'),
+            explode(',', (string) env('YOUTUBE_ALLOWED_HANDLES', implode(',', [
+                'thecompoundnews',
+                'theprofgpod',
+            ]))),
+        ), fn (string $h): bool => $h !== '@')),
     ],
 
     // Share-price source: 'mock' (fixtures) or 'eodhd' (live, not implemented).
